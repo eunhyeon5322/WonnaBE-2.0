@@ -9,7 +9,12 @@ import static com.wonnabe.product.dto.CardProductDetailResponseDTO.*;
 import static com.wonnabe.product.dto.CardRecommendationResponseDTO.*;
 
 import com.wonnabe.product.dto.CardProductDetailResponseDTO;
+import com.wonnabe.product.dto.CardProductDetailResponseDTO.CardInfo;
+import com.wonnabe.product.dto.CardProductDetailResponseDTO.ComparisonChart;
+import com.wonnabe.product.dto.CardProductDetailResponseDTO.Note;
 import com.wonnabe.product.dto.CardRecommendationResponseDTO;
+import com.wonnabe.product.dto.CardRecommendationResponseDTO.PersonaRecommendation;
+import com.wonnabe.product.dto.CardRecommendationResponseDTO.RecommendedCard;
 import com.wonnabe.product.dto.UserCardDTO;
 import com.wonnabe.product.dto.UserCardDetailDTO;
 import com.wonnabe.product.dto.UserInfoForCardDTO;
@@ -18,6 +23,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.log4j.Log4j2;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.data.redis.core.RedisTemplate;
 
 import java.time.LocalDate;
 import java.time.Period;
@@ -33,12 +39,14 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.stream.Collectors;
 
+
 @Log4j2
 @Service("cardServiceImpl")
 @RequiredArgsConstructor
 public class CardServiceImpl implements CardService {
 
     private final CardMapper cardMapper;
+    private final RedisTemplate<String, Object> redisTemplate;
 
     // 페르소나 이름 매핑
     private static final Map<Integer, String> PERSONA_NAMES = Map.ofEntries(
@@ -75,10 +83,32 @@ public class CardServiceImpl implements CardService {
 
     @Override
     public CardRecommendationResponseDTO recommendCards(String userId, int topN) {
+        
+        // -------------------------------------------------------------------
+        // [WonnaBE 2.0 고도화] 1순위: Redis 초고속 메모장 먼저 확인하기
+        // -------------------------------------------------------------------
+        String redisKey = "user:recommendation:" + userId;
+        try {
+            // Redis에서 이 유저의 미리 계산된 추천 결과가 있는지 확인
+            CardRecommendationResponseDTO cachedResult = (CardRecommendationResponseDTO) redisTemplate.opsForValue().get(redisKey);
+            
+            if (cachedResult != null) {
+                log.info("🚀 [Redis Cache Hit] 대기 시간 0초! 백그라운드에서 미리 계산된 추천 결과를 반환합니다. 유저: {}", userId);
+                return cachedResult;
+            }
+        } catch (Exception e) {
+            log.error("⚠️ Redis 조회 중 예외 발생 (안전하게 기존 MySQL 로직으로 백업 진행): ", e);
+        }
+
+        // -------------------------------------------------------------------
+        // 2순위: 만약 Redis에 데이터가 없다면? (기존 1.0 오리지널 로직 작동)
+        // -------------------------------------------------------------------
+        log.info("🐢 [Redis Cache Miss] 미리 계산된 결과가 없어 기존 MySQL 실시간 계산을 수행합니다. 유저: {}", userId);
+
         // 1. 사용자 정보 조회 (소득, 소비, 워너비 ID 등)
         UserInfoForCardDTO userInfo = cardMapper.findUserInfoForCardRecommend(userId);
         if (userInfo == null || userInfo.getSelectedWonnabeIds() == null || userInfo.getSelectedWonnabeIds().isEmpty()) {
-            throw new NoSuchElementException("추천을 위한 사용자 정보가 부족합니다."); // 404
+            throw new NoSuchElementException("추천을 위한 사용자 정보가 부족합니다.");
         }
 
         // 내가 보유한 카드 ID 리스트
@@ -88,7 +118,7 @@ public class CardServiceImpl implements CardService {
         // 2. 카드 상품 목록 조회
         List<CardProductVO> cardProducts = cardMapper.findAllCardProducts();
         if (cardProducts == null || cardProducts.isEmpty()) {
-            throw new NoSuchElementException("추천할 카드 상품이 없습니다."); // 404
+            throw new NoSuchElementException("추천할 카드 상품이 없습니다.");
         }
 
         // 3. 응답 객체
